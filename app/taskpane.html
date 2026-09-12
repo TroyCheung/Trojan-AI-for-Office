@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="zh-CN" data-framework="Office-AI-addin">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="X-UA-Compatible" content="IE=Edge" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Trojan AI for Office</title>
+  <script>
+    // 本地服务器的 API 访问令牌，由 server.py 在返回本页面时注入（直接双击打开本文件时保持占位符，API 调用会安全失败）
+    window.__LOCAL_API_TOKEN__ = '__LOCAL_API_TOKEN__';
+    function _officeStub() {
+      window.__officeJsSource__ = window.__officeJsSource__ || 'stub(完全失败)';
+      window.Office = { onReady: function (cb) { cb && cb({}); } };
+    }
+    // 【不要在这里放 MicrosoftAjax shim】office.js 的就绪检测若被 shim 骗过会跳过 aspnetcdn
+    // 加载，但宿主文件（excel-mac-16.00.js 等）内嵌的完整 MicrosoftAjax 是「window.Type
+    // 已存在则不覆盖」模式——shim 先占住 window.Type 会让宿主的真实现跳过初始化，
+    // Excel 全局建立失败、宿主退化为 demo 态（2026-08-31 v84 真机实测回归，v85 删除）。
+    // 正确姿势：不 shim。office.js 并行请求 aspnetcdn（被墙网络下失败，无害），
+    // 随后 waitForFunction 轮询到宿主文件内嵌的 MicrosoftAjax 就绪，链路继续。
+    // office.js 本地优先（assets/vendor/office-js/ 自托管副本），本地缺失时回退官方 CDN，
+    // CDN 也不可用（无代理网络）时退化为浏览器演示模式。
+    //
+    // 【vendor 版本会决定功能，不只是决定快慢——2026-08-31 血泪】
+    // 自托管 = 冻结版本。CDN 上的 office.js 是常青的（微软持续更新），抄到本地那一刻起就是标本。
+    // 曾因 vendor 冻结在 16.0.15407（2022-06）导致「插件写入无法被 ⌘Z 撤销」查了整整两轮：
+    // 插件写入进撤销栈是 ExcelApi 1.20（2025-09）才有的能力，2022 年的包里连 mergeUndoGroup /
+    // UndoNotSupported 这两个关键字都搜不到，代码怎么改都没用。同机 ChatGPT/Claude for Excel
+    // 走 CDN 常青版所以能撤销，正是这个差别。
+    // 现 vendor：16.0.20416.15170。**每年至少同步一次**，同步后跑全量测试 + 真机验一次 ⌘Z。
+    // 插件内自检：设置页能力表看 undoSupported（探针见 host-excel.js probeExcelCapabilities）。
+    function _officeJsFallbackChain() {
+      var s = document.createElement('script');
+      s.src = 'https://appsforoffice.microsoft.com/lib/1/hosted/office.js?v=24';
+      s.onload = function () { window.__officeJsSource__ = 'CDN 回退'; };
+      s.onerror = _officeStub;
+      document.head.appendChild(s);
+    }
+  </script>
+  <!-- ?v= 必须跟着 vendor 包一起升：WKWebView 会缓存 office.js，不击穿的话换了包也还是跑旧的
+       （宿主文件 excel-mac-16.00.js 等由 office.js 内部按自身版本号拼 URL 请求，会自动击穿，无需手工加参） -->
+  <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js" onload="window.__officeJsSource__='Microsoft CDN'" onerror="_officeStub()"></script>
+  <link rel="stylesheet" href="assets/css/app.css?v=156" />
+  <link rel="stylesheet" href="assets/css/blocks.css?v=150" />
+</head>
+<body>
+  <div id="container"></div>
+  <div id="legacy-message" class="legacy-message" hidden>
+    This add-in will not run in your version of Office. Please upgrade either to perpetual Office 2021 or later, or to a Microsoft 365 account.
+  </div>
+  <script src="assets/js/config.js?v=172"></script>
+  <script src="assets/js/icons.js?v=170"></script>
+  <script src="assets/js/skills-data.js?v=184"></script>
+  <script src="assets/js/skills.js?v=170"></script>
+  <script src="assets/js/state.js?v=183"></script>
+  <script src="assets/js/ppt-task-scope.js?v=183"></script>
+  <script src="assets/js/tool-groups.js?v=170"></script>
+  <script src="assets/js/memory.js?v=170"></script>
+  <script src="assets/js/review.js?v=170"></script>
+  <script src="assets/js/protocols.js?v=170"></script>
+  <script src="assets/js/markdown.js?v=170"></script>
+  <script src="assets/js/host.js?v=170"></script>
+  <script src="assets/js/host-excel.js?v=170"></script>
+  <script src="assets/js/ooxml-revisions.js?v=170"></script>
+  <script src="assets/js/host-word.js?v=170"></script>
+  <script src="assets/js/host-powerpoint.js?v=184"></script>
+  <script src="assets/js/dialects.js?v=170"></script>
+  <script src="assets/js/render-blocks.js?v=170"></script>
+  <script src="assets/js/ai-client.js?v=184"></script>
+  <script src="assets/js/api.js?v=184"></script>
+  <script src="assets/js/files.js?v=170"></script>
+  <script src="assets/js/edit-flash.js?v=170"></script>
+  <script src="assets/js/change-log.js?v=172"></script>
+  <script src="assets/js/toast.js?v=170"></script>
+  <script src="assets/js/model-logos.js?v=170"></script>
+  <script src="assets/js/ui.js?v=181"></script>
+  <script src="assets/js/app.js?v=170"></script>
+</body>
+</html>

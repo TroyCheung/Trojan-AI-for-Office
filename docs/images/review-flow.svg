@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="768" height="192" viewBox="0 0 1440 360" role="img" aria-labelledby="title desc">
+<title id="title">从现有文件到可核对的修改</title><desc id="desc">在审核模式下，指定范围，读取上下文，提出修改，由用户决定采用，再写回核对。流程示意。</desc>
+<rect width="1440" height="360" fill="#183d32"/><g font-family="Arial,'PingFang SC','Microsoft YaHei',sans-serif">
+<text x="52" y="62" font-size="25" fill="#fffdf6" font-weight="700">在原文件中完成一次修改</text><text x="1186" y="61" font-size="17" fill="#acc1b3">审核模式 · 流程示意</text>
+<g fill="#fffdf6"><rect x="50" y="104" width="235" height="142" rx="9"/><rect x="325" y="104" width="235" height="142" rx="9"/><rect x="600" y="104" width="235" height="142" rx="9"/><rect x="875" y="104" width="235" height="142" rx="9"/><rect x="1150" y="104" width="235" height="142" rx="9"/></g>
+<g fill="#db643c" font-size="18" font-weight="700"><text x="72" y="138">01</text><text x="347" y="138">02</text><text x="622" y="138">03</text><text x="897" y="138">04</text><text x="1172" y="138">05</text></g>
+<g fill="#183d32" font-size="26" font-weight="700"><text x="72" y="180">指定范围</text><text x="347" y="180">读取上下文</text><text x="622" y="180">提出修改</text><text x="897" y="180">由你决定</text><text x="1172" y="180">写回并核对</text></g>
+<g fill="#64786b" font-size="18"><text x="72" y="215">说清这次要解决什么</text><text x="347" y="215">结合已有内容与格式</text><text x="622" y="215">看清原文与修改建议</text><text x="897" y="215">采用、拒绝或再调整</text><text x="1172" y="215">检查实际完成情况</text></g>
+<g fill="#d9b889" font-size="29"><text x="292" y="185">→</text><text x="567" y="185">→</text><text x="842" y="185">→</text><text x="1117" y="185">→</text></g><text x="52" y="310" font-size="21" fill="#d7e3d7">基础规则提供章法。你的指令与 skill，补充具体的工作方法。</text>
+</g></svg>

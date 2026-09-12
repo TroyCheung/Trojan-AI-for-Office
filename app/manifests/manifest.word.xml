@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<OfficeApp xmlns="http://schemas.microsoft.com/office/appforoffice/1.1" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:bt="http://schemas.microsoft.com/office/officeappbasictypes/1.0" xmlns:ov="http://schemas.microsoft.com/office/taskpaneappversionoverrides" xsi:type="TaskPaneApp">
+  <Id>691ade63-f5fa-4c44-a2a1-66e1f8733a51</Id>
+  <Version>1.0.2.0</Version>
+    <ProviderName>Trojan AI for Office</ProviderName>
+  <DefaultLocale>zh-CN</DefaultLocale>
+  <DisplayName DefaultValue="Trojan AI for Office（试用版）"/>
+  <Description DefaultValue="AI Chat for Word - Chat with LLMs directly in Word using your own API keys."/>
+  <IconUrl DefaultValue="https://localhost:18443/assets/brand/icon-32.png"/>
+  <HighResolutionIconUrl DefaultValue="https://localhost:18443/assets/brand/icon-80.png"/>
+  <SupportUrl DefaultValue="https://localhost:18443/support.html"/>
+  <AppDomains>
+    <AppDomain>https://localhost:18443</AppDomain>
+  </AppDomains>
+  <Hosts>
+    <Host Name="Document"/>
+  </Hosts>
+  <DefaultSettings>
+    <SourceLocation DefaultValue="https://localhost:18443/taskpane.html"/>
+  </DefaultSettings>
+  <Permissions>ReadWriteDocument</Permissions>
+  <VersionOverrides xmlns="http://schemas.microsoft.com/office/taskpaneappversionoverrides" xsi:type="VersionOverridesV1_0">
+    <Hosts>
+      <Host xsi:type="Document">
+        <DesktopFormFactor>
+          <GetStarted>
+            <Title resid="GetStarted.Title"/>
+            <Description resid="GetStarted.Description"/>
+            <LearnMoreUrl resid="GetStarted.LearnMoreUrl"/>
+          </GetStarted>
+          <FunctionFile resid="Commands.Url"/>
+          <ExtensionPoint xsi:type="PrimaryCommandSurface">
+            <OfficeTab id="TabHome">
+              <Group id="CommandsGroup">
+                <Label resid="CommandsGroup.Label"/>
+                <Icon>
+                  <bt:Image size="16" resid="Icon.16x16"/>
+                  <bt:Image size="32" resid="Icon.32x32"/>
+                  <bt:Image size="64" resid="Icon.64x64"/>
+                  <bt:Image size="80" resid="Icon.80x80"/>
+                </Icon>
+                <Control xsi:type="Button" id="TaskpaneButton">
+                  <Label resid="TaskpaneButton.Label"/>
+                  <Supertip>
+                    <Title resid="TaskpaneButton.Label"/>
+                    <Description resid="TaskpaneButton.Tooltip"/>
+                  </Supertip>
+                  <Icon>
+               <bt:Image size="16" resid="Icon.16x16"/>
+                  <bt:Image size="32" resid="Icon.32x32"/>
+                  <bt:Image size="64" resid="Icon.64x64"/>
+                  <bt:Image size="80" resid="Icon.80x80"/>
+                  </Icon>
+                  <Action xsi:type="ShowTaskpane">
+                    <TaskpaneId>ITrojanAI</TaskpaneId>
+                    <SourceLocation resid="Taskpane.Url"/>
+                  </Action>
+                </Control>
+              </Group>
+            </OfficeTab>
+          </ExtensionPoint>
+        </DesktopFormFactor>
+      </Host>
+    </Hosts>
+    <Resources>
+      <bt:Images>
+        <bt:Image id="Icon.16x16" DefaultValue="https://localhost:18443/assets/brand/icon-16.png"/>
+        <bt:Image id="Icon.32x32" DefaultValue="https://localhost:18443/assets/brand/icon-32.png"/>
+        <bt:Image id="Icon.64x64" DefaultValue="https://localhost:18443/assets/brand/icon-64.png"/>
+        <bt:Image id="Icon.80x80" DefaultValue="https://localhost:18443/assets/brand/icon-80.png"/>
+      </bt:Images>
+      <bt:Urls>
+        <bt:Url id="GetStarted.LearnMoreUrl" DefaultValue="https://localhost:18443"/>
+        <bt:Url id="Commands.Url" DefaultValue="https://localhost:18443/commands.html"/>
+        <bt:Url id="Taskpane.Url" DefaultValue="https://localhost:18443/taskpane.html"/>
+      </bt:Urls>
+      <bt:ShortStrings>
+        <bt:String id="GetStarted.Title" DefaultValue="Welcome to Trojan AI for Office!"/>
+        <bt:String id="CommandsGroup.Label" DefaultValue="Trojan AI for Office"/>
+        <bt:String id="TaskpaneButton.Label" DefaultValue="Trojan AI for Office"/>
+      </bt:ShortStrings>
+      <bt:LongStrings>
+        <bt:String id="GetStarted.Description" DefaultValue="Chat with AI models directly in Word. Configure your API keys in Settings to get started."/>
+        <bt:String id="TaskpaneButton.Tooltip" DefaultValue="Open the AI chat panel"/>
+      </bt:LongStrings>
+    </Resources>
+  </VersionOverrides>
+</OfficeApp>

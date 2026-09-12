@@ -1,0 +1,32 @@
+name: 使用问题
+description: 描述想完成的任务和实际遇到的问题
+title: "[使用问题] "
+body:
+  - type: markdown
+    attributes:
+      value: "请勿填写 API Key、客户资料或完整聊天记录。更新与回复不定期；隐私问题请勿在公开 Issue 粘贴敏感细节。"
+  - type: input
+    id: environment
+    attributes:
+      label: 电脑系统与 Office 应用
+      placeholder: 例如 macOS、Word Microsoft 365；插件版本
+    validations:
+      required: true
+  - type: textarea
+    id: task
+    attributes:
+      label: 你想让它做什么？
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: 实际发生了什么？
+      description: 可附简短步骤、错误提示或遮住敏感内容的截图。
+    validations:
+      required: true
+  - type: input
+    id: model
+    attributes:
+      label: 使用的模型（选填）
+      description: 只填服务和模型名称，不填 Key 或私人服务地址。

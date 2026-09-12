@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="768" height="331" viewBox="0 0 1440 620" role="img" aria-labelledby="title desc">
+<title id="title">Trojan AI for Office</title><desc id="desc">让 AI 在原文件里帮忙，让你看清它改了什么。Word、PowerPoint、Excel。</desc>
+<rect width="1440" height="620" fill="#f3f0e8"/><path d="M930 0H1440V620H1130Z" fill="#e1e8dc"/>
+<g font-family="Arial,'PingFang SC','Microsoft YaHei',sans-serif">
+<rect x="70" y="65" width="8" height="40" fill="#db643c"/><text x="97" y="95" font-size="31" font-weight="700" fill="#183d32">TROJAN AI FOR OFFICE</text>
+<text x="72" y="214" font-size="58" font-weight="700" fill="#183d32">让 AI 在原文件里帮忙。</text>
+<text x="72" y="296" font-size="58" font-weight="700" fill="#183d32">让你看清它改了什么。</text>
+<text x="75" y="359" font-size="25" fill="#4a6258">从已有内容开始，把建议变成可核对的修改。</text>
+<g transform="translate(76 425)" font-size="21"><rect width="135" height="47" rx="23" fill="#183d32"/><text x="39" y="31" fill="white">Word</text><rect x="150" width="202" height="47" rx="23" fill="#183d32"/><text x="177" y="31" fill="white">PowerPoint</text><rect x="367" width="131" height="47" rx="23" fill="#183d32"/><text x="404" y="31" fill="white">Excel</text></g>
+<text x="76" y="554" font-size="18" letter-spacing="2" fill="#68786e">自己的模型 · 基础工作指引 · 自定义 SKILL</text>
+<g transform="translate(1038 320)"><rect width="313" height="231" rx="12" fill="#fffdf6" stroke="#b9c9bd" stroke-width="2"/><text x="25" y="47" font-size="17" fill="#64786b">修改建议 · 示意</text><path d="M26 78H277M26 103H230" stroke="#cdd3c9" stroke-width="9"/><rect x="25" y="130" width="264" height="37" rx="5" fill="#e1eddf"/><path d="M37 148H250" stroke="#487159" stroke-width="6"/><rect x="190" y="184" width="99" height="29" rx="5" fill="#db643c"/><text x="222" y="205" font-size="17" fill="white">采用</text></g>
+</g></svg>
