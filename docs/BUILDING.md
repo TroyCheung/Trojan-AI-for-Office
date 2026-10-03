@@ -8,3 +8,9 @@
 2. 运行 `pkgutil --expand-full build-cache/python-mac.pkg build-cache/python-mac-expanded`，解开运行环境。
 3. 使用空的 `staging` 目录，运行 `python3 tools/package.py`。Mac 安装包输出到 `releases`。
 4. 运行 `python3 -m unittest discover -s tests`，并在实际 Office 中验证安装、使用和卸载。
+
+## PPT / Excel 恢复逻辑回归
+
+安装 Node.js 22 或更新版本后，运行 `node --test tests/*.test.js`。这些测试使用仿真的 Office 对象和脚本化模型回复，覆盖锚点失配、重新读取后恢复及重复失败停止；不需要真实模型密钥。
+
+离线通过不替代实际 Office 验收。合并本轮恢复修复前，还需在试用版副本上核对 PowerPoint/Excel 的恢复、停止、重连，并复查 Word 共享循环行为。安装包需另行构建和验证。

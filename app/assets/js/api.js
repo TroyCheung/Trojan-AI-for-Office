@@ -723,6 +723,14 @@ ${App.host && App.host.hostType === 'excel' ? `
     const FAILURE_STOP_AT = 6;   // 连续第 6 次：停下来把问题交回给用户
     // 保险丝：模型陷入犹豫/重复循环时强制停下，已完成的部分保留，用户说「继续」即可接力
     const MAX_AGENT_STEPS = 25;
+    // 【recovery-loop】PPT/Excel 的「同参数且同结果」重复失败收紧为第 2 次提示、第 3 次强制停止
+    // （ProgressGuard 按指纹判定，参数或结果变化即重新计）。Word 不接入：保持上方
+    // consecutiveToolFailures 3 提示 6 停止的既有行为不变。progress-guard.js 未加载时
+    // （taskpane 尚未接线）守卫为 null，本循环行为与旧版完全一致，不报错。
+    const progressGuard = (App.ProgressGuard && typeof App.ProgressGuard.create === 'function'
+      && (App.host.hostType === 'powerpoint' || App.host.hostType === 'excel'))
+      ? App.ProgressGuard.create()
+      : null;
 
     while (true) {
       if (state.stopRequested) { state.activePptTaskScope = null; throw makeAbortError(); }
@@ -817,6 +825,8 @@ ${App.host && App.host.hostType === 'excel' ? `
         let finishAfterProposal = false;
         const pendingVisualInputs = [];
         const layoutTouchedSlides = new Set();
+        // 【recovery-loop】本批次的真实工具调用与结果，批次末交给 ProgressGuard 判重复
+        const batchCalls = [];
         // 界面上已经展示给用户的方案必须进入历史。少数兼容接口会在带工具调用时
         // 返回空 content，但流式回调中其实已经收到完整正文。
         const assistantApiMsg = { role: 'assistant', content: assistantUi.content || msg.content || '', tool_calls: msg.tool_calls };
@@ -846,6 +856,7 @@ ${App.host && App.host.hostType === 'excel' ? `
             uiCall.status = 'error';
             uiCall.result = parseResult;
             appendToolResult(messages, assistantUi, tc, name, parseResult, pendingVisualInputs);
+            batchCalls.push({ name, args, result: parseResult });
             App.patchStreamingMessage(assistantUi);
             continue;
           }
@@ -857,6 +868,7 @@ ${App.host && App.host.hostType === 'excel' ? `
             uiCall.status = scopeResult.success ? 'complete' : 'error';
             uiCall.result = scopeResult;
             appendToolResult(messages, assistantUi, tc, name, scopeResult, pendingVisualInputs);
+            batchCalls.push({ name, args, result: scopeResult });
             App.persistCurrentSession();
             App.patchStreamingMessage(assistantUi);
             continue;
@@ -867,6 +879,7 @@ ${App.host && App.host.hostType === 'excel' ? `
             uiCall.status = 'error';
             uiCall.result = blockedResult;
             appendToolResult(messages, assistantUi, tc, name, blockedResult, pendingVisualInputs);
+            batchCalls.push({ name, args, result: blockedResult });
             App.patchStreamingMessage(assistantUi);
             continue;
           }
@@ -909,6 +922,7 @@ ${App.host && App.host.hostType === 'excel' ? `
               uiCall.status = 'error';
               uiCall.result = vetResult;
               appendToolResult(messages, assistantUi, tc, name, vetResult, pendingVisualInputs);
+              batchCalls.push({ name, args, result: vetResult });
               App.patchStreamingMessage(assistantUi);
               continue;
             }
@@ -925,16 +939,47 @@ ${App.host && App.host.hostType === 'excel' ? `
               uiCall.status = 'error';
               uiCall.result = shellResult;
               appendToolResult(messages, assistantUi, tc, name, shellResult, pendingVisualInputs);
+              batchCalls.push({ name, args, result: shellResult });
               App.patchStreamingMessage(assistantUi);
               continue;
             }
             // 提案工具：渲染 Diff 卡等待用户决策（应用/拒绝），结果回传给模型。
             // changes = 多处修改的批量卡；edits = 单处多版本。
+            // 【recovery-loop · B1 对齐】PPT/Excel 出卡前 enrich 抛错（错字 find、过期 shapeId、
+            // expectedCells 失配等）不得逃出回合整轮报错：ui.js 的 presentEditProposal 只在
+            // finally 复位准备标记，异常原样上抛。这里转成结构化错误回执（success:false +
+            // retryable:true + 完整原因）回喂模型，让它先重读（get_slide / read_range）再修正
+            // 重出；同参 proposal 连续抛错进入 ProgressGuard 的 2 提示 3 停止。Word 保持原
+            // 行为：异常照常上抛，不转换。
             state.workPhase = null;
-            toolResult = await App.presentEditProposal(uiCall, args);
+            try {
+              toolResult = await App.presentEditProposal(uiCall, args);
+            } catch (e) {
+              if (App.host.hostType !== 'powerpoint' && App.host.hostType !== 'excel') throw e;
+              // 停止/取消语义优先于回喂：AbortError、WRITE_CANCELLED（用户停止打断写入，
+              // 零提交，见 host.js docWriteBegin）与 stopRequested 必须原样终止本轮，
+              // 不得转成 retryable 回执诱发模型继续写。取消类异常保留原始身份上抛，
+              // 供上层按既有停止流程结算；仅 stopRequested 无具体异常时用统一 AbortError。
+              if (state.stopRequested || e?.name === 'AbortError' || e?.code === 'WRITE_CANCELLED') {
+                stopRemainingToolCalls(messages, assistantUi, msg.tool_calls, tcIndex, uiCall);
+                state.activePptTaskScope = null;
+                App.render();
+                throw (e && (e.name === 'AbortError' || e.code === 'WRITE_CANCELLED')) ? e : makeAbortError();
+              }
+              // 回执形状对齐 vet 拦截路径（success:false + retryable + 完整原因）；
+              // 卡片尚未注册（解析器在 enrich 成功后才就位），不碰卡结算状态。
+              toolResult = { success: false, retryable: true, error: e.message || String(e) };
+              uiCall.status = 'error';
+              uiCall.result = toolResult;
+              appendToolResult(messages, assistantUi, tc, name, toolResult, pendingVisualInputs);
+              batchCalls.push({ name, args, result: toolResult });
+              App.patchStreamingMessage(assistantUi);
+              continue;
+            }
             uiCall.status = toolResult && toolResult.declined ? 'stopped' : (toolResult && toolResult.success === false ? 'error' : 'complete');
             uiCall.result = toolResult;
             appendToolResult(messages, assistantUi, tc, name, toolResult, pendingVisualInputs);
+            batchCalls.push({ name, args, result: toolResult });
             const proposalSlides = proposalTouchedSlideIndexes(args, toolResult);
             for (const slideIndex of proposalSlides) layoutTouchedSlides.add(slideIndex);
             if (pptScope && App.pptTaskScope && Array.isArray(args.changes) && Array.isArray(toolResult && toolResult.results)) {
@@ -1036,11 +1081,26 @@ ${App.host && App.host.hostType === 'excel' ? `
           }
           if (toolResult && toolResult.success !== false) consecutiveToolFailures.set(name, 0);
           appendToolResult(messages, assistantUi, tc, name, toolResult, pendingVisualInputs);
+          batchCalls.push({ name, args, result: toolResult });
           App.patchStreamingMessage(assistantUi);
         }
         appendVisualInputs(messages, pendingVisualInputs);
         if (!finishAfterProposal && layoutTouchedSlides.size) {
           await appendAutomaticLayoutReviews(messages, layoutTouchedSlides, layoutReviewCounts, pptScope);
+        }
+        // 【recovery-loop】批次末无进展判定：第 2 次同参同结果 → 注入系统纠偏（提示）；
+        // 第 3 次 → 强制收尾，不再发起下一次模型请求。已完成的部分保留，用户说「继续」即可接力。
+        const guardVerdict = progressGuard ? progressGuard.observeBatch(batchCalls) : null;
+        if (guardVerdict && guardVerdict.action === 'correct' && guardVerdict.guidance) {
+          messages.push({ role: 'user', content: '【系统纠偏，不是新任务】' + guardVerdict.guidance });
+        }
+        if (guardVerdict && guardVerdict.action === 'stop') {
+          const stopText = guardVerdict.guidance || '本轮没有新进展，已停止重复操作。';
+          state.messages.push({ role: 'assistant', content: stopText, timestamp: App.now() });
+          state.activePptTaskScope = null;
+          App.persistCurrentSession();
+          App.render();
+          return;
         }
         App.persistCurrentSession();
         if (finishAfterProposal) { state.activePptTaskScope = null; App.render(); return; }

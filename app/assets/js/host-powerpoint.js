@@ -463,6 +463,20 @@
     } catch (e) { return ''; }
   }
 
+  // 【harden-ppt-excel-recovery 2.1】带可读性的文本读取：读取失败必须与「真空文本」分开。
+  // 锚点核验拿不到证据时按不可核验处理（拒绝/打回），不把读取失败冒充空文本。
+  async function shapeTextDetailed(context, shape) {
+    try {
+      const range = shape.textFrame.textRange;
+      range.load('text');
+      await context.sync();
+      const t = range.text;
+      return { text: typeof t === 'string' ? t : '', unreadable: false };
+    } catch (e) {
+      return { text: '', unreadable: true, error: String((e && e.message) || e).slice(0, 120) };
+    }
+  }
+
   // 表格文本：逐单元格独立 sync 读取，任何一格失败不影响其余（Table API 仅在部分宿主可用，整体失败返回空）
   async function tableTextSafe(context, shape) {
     try {
@@ -2592,6 +2606,178 @@
     catch (e) { return String((e && e.message) || e); }
   }
 
+  // ================= 文字提案锚点核验（出卡前 + 应用时共用） =================
+  // 【harden-ppt-excel-recovery 2.1】此前文字卡（省略 kind 与 target.kind:"notes"）只在
+  // applyEdit 里做匹配：错字 find、过期 shapeId、重复命中要等用户点卡后才失败，报错又缺
+  // 当前文本对照。现在出卡前先核验（任一项不合法即拒绝整卡，只读零写入），应用时再核验保留。
+  // 定位骨架只有这一份：locateTextEditTarget 同时服务 enrich 与 applyEdit，避免两套语义。
+
+  // 错误里的引文：超长文本显式截断并标注原文长度，不让模型把截断尾巴当原文
+  function quoteAnchorText(value, rereadTool) {
+    const text = String(value == null ? '' : value);
+    if (text.length <= 500) return text;
+    return text.slice(0, 500) + `…（已截断：原文 ${text.length} 字，请用 ${rereadTool || 'get_slide'} 读取完整原文）`;
+  }
+
+  // 文字卡目标定位：slideId/index → 页；notes 走备注形状扫描，普通文字按 shapeId 限定
+  // （顶层 + 组合递归）或扫描顶层 + 组合子形状；findSafeTextMatch 唯一命中才算定位成功。
+  // 返回定位证据（候选/唯一命中/同框多中/不可读），失败原因由 describeTextAnchorProblem 统一描述。
+  async function locateTextEditTarget(context, edit) {
+    const target = edit.target || {};
+    const find = String(edit.find == null ? '' : edit.find);
+    const slides = context.presentation.slides;
+    slides.load('items');
+    await context.sync();
+    slides.items.forEach(s => s.load('id'));
+    await context.sync();
+    const slide = target.slideId ? slides.items.find(s => s.id === target.slideId) : slides.items[Number(target.index)];
+    const safeId = shape => { try { return shape && shape.id != null ? String(shape.id) : ''; } catch { return ''; } };
+    const safeType = shape => { try { return shape && shape.type != null ? String(shape.type) : ''; } catch { return ''; } };
+    const result = {
+      target, find, slide,
+      slideIndex: slide ? slides.items.indexOf(slide) : Number(target.index),
+      slidesCount: slides.items.length,
+      kind: target.kind === 'notes' ? 'notes' : 'shape',
+      candidates: [], located: [], ambiguous: [], slideShapeIds: []
+    };
+    if (!slide) return result;
+    const classify = entry => {
+      result.candidates.push(entry);
+      if (entry.unreadable) return;
+      const match = App.findSafeTextMatch(entry.text, find);
+      if (match.status === 'matched') result.located.push(entry);
+      else if (match.status === 'ambiguous') result.ambiguous.push(Object.assign({ count: match.count }, entry));
+    };
+    if (result.kind === 'notes') {
+      let notes;
+      try { notes = slide.notesSlide; notes.shapes.load('items'); await context.sync(); }
+      catch { result.notesUnavailable = true; return result; }
+      for (const shape of notes.shapes.items || []) {
+        const read = await shapeTextDetailed(context, shape);
+        classify({ shape, shapeId: safeId(shape), type: safeType(shape), text: read.text, unreadable: read.unreadable });
+      }
+      return result;
+    }
+    slide.shapes.load('items');
+    await context.sync();
+    slide.shapes.items.forEach(s => s.load('id,type'));
+    await context.sync();
+    result.slideShapeIds = (slide.shapes.items || []).map(safeId).filter(Boolean);
+    let shapes;
+    if (target.shapeId) {
+      const found = await findShapeById(context, slide, target.shapeId, 'id');
+      shapes = found ? [found] : [];
+    } else {
+      // 候选形状 = 顶层形状 + 各组合的子形状：读取侧对组合已递归可见，写侧必须能定位回去
+      shapes = [...slide.shapes.items];
+      for (const candidate of slide.shapes.items) {
+        if (String(candidate.type || '') !== 'Group' || !candidate.shapes) continue;
+        try {
+          candidate.shapes.load('items');
+          await context.sync();
+          candidate.shapes.items.forEach(child => { try { child.load('id'); } catch {} });
+          await context.sync();
+          shapes.push(...(candidate.shapes.items || []));
+        } catch {}
+      }
+    }
+    for (const shape of shapes) {
+      const read = await shapeTextDetailed(context, shape);
+      classify({ shape, shapeId: safeId(shape), type: safeType(shape), text: read.text, unreadable: read.unreadable });
+    }
+    return result;
+  }
+
+  // 统一失败原因（出卡前拒绝与应用时拦截同语义）：必含提交 find 全文、目标当前文本证据
+  // （>500 字显式截断）与下一步读取动作。重复命中给正确消歧：形状跨框用 target.shapeId，
+  // 同框与「一框唯一 + 另框多次」的混合歧义都要求更长唯一片段，绝不静默取第一处、不猜唯一框；
+  // 备注锚点只能靠文字定位，不得推荐无效的 shapeId 消歧。返回 null 表示锚点合法（全页唯一）。
+  function describeTextAnchorProblem(edit, loc) {
+    const target = loc.target || {};
+    const find = String(edit.find == null ? '' : edit.find);
+    const isNotes = loc.kind === 'notes';
+    const reread = isNotes ? 'get_slide_notes' : 'get_slide';
+    const label = edit.label ? `「${String(edit.label).slice(0, 30)}」` : '';
+    const findLine = `你提交的 find 全文：「${quoteAnchorText(find, reread)}」`;
+    if (!find.trim()) {
+      return `${label}缺 find：文字卡必须锚定页面上真实存在的文字，程序不会猜目标（${findLine}）。纯新增文字请改用 insert_textbox 直通写入，不走提案卡。`;
+    }
+    if (!loc.slide) {
+      const at = target.slideId ? `slideId=${target.slideId}` : `target.index=${target.index == null ? '未提供' : target.index}`;
+      return `${label}目标页不存在（${at}，当前演示文稿共 ${loc.slidesCount} 页）。${findLine}请先用 get_presentation_outline 或 get_slide 核对页号，按现状重出提案。`;
+    }
+    if (loc.notesUnavailable) {
+      return `${label}无法访问第 ${loc.slideIndex} 页的备注页：这页可能还没有备注实例（不是宿主缺少备注 API，也不等于备注为空）。${findLine}请先用 get_slide_notes 确认该页确有备注文字；没有备注的页不要出 target.kind:"notes" 的卡。`;
+    }
+    if (!isNotes && target.shapeId && !loc.candidates.length) {
+      const ids = (loc.slideShapeIds || []).join('、') || '（无）';
+      return `${label}第 ${loc.slideIndex} 页找不到形状 shapeId「${target.shapeId}」——形状可能已被移动或删除。本页现有形状 id：${ids}。${findLine}请先用 get_slide 重读该页拿到当前形状列表，按现状重出提案。`;
+    }
+    if (!isNotes && target.shapeId && loc.candidates.length === 1 && loc.candidates[0].unreadable && String(loc.candidates[0].type || '') === 'Table') {
+      return `${label}目标形状「${target.shapeId}」是表格（Table）：文字卡定位不了表格单元格。表格文字在各单元格里，形状没有整体 textFrame，get_slide 深读到的表格文字不能用作 propose_edits 的 find，按原样重出文字卡必然再次失败。替代路径：单元格字体/字号/字色/加粗/底色用 set_table_style；加删行列用 edit_table_structure（多数宿主没有该 API，本机能力探测通过才可用）；表格整体位置尺寸用 apply_layout 改 left/top/width/height；要改单元格里的文字内容，本插件没有专用工具，请如实告诉用户需要手动处理。${findLine}`;
+    }
+    if (!isNotes && target.shapeId && loc.candidates.length === 1 && loc.candidates[0].unreadable) {
+      return `${label}无法读取形状「${target.shapeId}」的文字（读取失败，不是空文本：组合、图片等对象可能没有本宿主可读的文字框架）。${findLine}请先用 get_slide 读取该形状的当前状态；读不到文字的形状不要出文字卡。`;
+    }
+    if (isNotes && (loc.located.length > 1 || loc.ambiguous.length)) {
+      const parts = [];
+      for (const c of loc.located) parts.push(`一个备注文字形状唯一命中（当前文本：「${quoteAnchorText(c.text, reread)}」）`);
+      for (const a of loc.ambiguous) parts.push(`一个备注文字形状内出现 ${a.count} 次（当前文本：「${quoteAnchorText(a.text, reread)}」）`);
+      return `${label}find 在第 ${loc.slideIndex} 页备注内定位不唯一：${parts.join('；')}。程序不会静默取第一处；备注锚点只能靠文字本身定位。${findLine}请把 find 扩长为包含足够上下文、在整个备注内唯一的片段。`;
+    }
+    if (loc.located.length > 1) {
+      const list = loc.located.map(c => `shapeId「${c.shapeId}」当前文本：「${quoteAnchorText(c.text, reread)}」`).join('；');
+      return `${label}find 在 ${loc.located.length} 个文本框中各自唯一命中，无法确定要改哪一个：${list}。${findLine}请用 target.shapeId 限定目标，或改用只在目标文本框中出现的更长原文。`;
+    }
+    if (loc.ambiguous.length) {
+      // 同框多次命中；或一框唯一命中 + 另一框多次命中（混合歧义）——唯一的一框未必是目标，不得猜
+      const parts = [];
+      if (loc.located.length === 1) parts.push(`shapeId「${loc.located[0].shapeId}」唯一命中（当前文本：「${quoteAnchorText(loc.located[0].text, reread)}」）`);
+      for (const a of loc.ambiguous) parts.push(`shapeId「${a.shapeId}」内出现 ${a.count} 次（当前文本：「${quoteAnchorText(a.text, reread)}」）`);
+      const hint = target.shapeId
+        ? '请把 find 扩长为包含足够上下文、在该框内唯一的原文片段。'
+        : '请用 target.shapeId 指定目标文本框，且 find 在该框内必须只出现 1 次（必要时扩长为带上下文的唯一片段）。';
+      return `${label}find 在第 ${loc.slideIndex} 页定位不唯一：${parts.join('；')}。程序不会静默取第一处，也不会替你猜哪个框才是目标。${findLine}${hint}`;
+    }
+    if (!loc.located.length) {
+      const readable = loc.candidates.filter(c => !c.unreadable);
+      const shown = readable.slice(0, 6).map(c => `shapeId「${c.shapeId}」当前文本：「${quoteAnchorText(c.text, reread)}」`).join('\n');
+      const more = readable.length > 6 ? `\n（其余 ${readable.length - 6} 个文本框文字未列出，请用 ${reread} 读取）` : '';
+      const unreadableCount = loc.candidates.length - readable.length;
+      const unreadNote = unreadableCount > 0 ? `\n另有 ${unreadableCount} 个形状文字读取失败（读取失败不是空文本，无法核验）。` : '';
+      const tableNote = loc.candidates.some(c => String(c.type || '') === 'Table')
+        ? '\n该页有表格：表格文字在单元格里（get_slide 能深读到），文字卡不能定位表格；表格样式用 set_table_style，加删行列用 edit_table_structure，整体位置尺寸用 apply_layout，改单元格文字内容需手动处理。'
+        : '';
+      const scope = isNotes
+        ? `该页备注页共扫描 ${loc.candidates.length} 个形状`
+        : target.shapeId ? '目标形状的文字如下' : `第 ${loc.slideIndex} 页共扫描 ${loc.candidates.length} 个文本框`;
+      const evidence = readable.length ? `${scope}：\n${shown}${more}${unreadNote}${tableNote}` : `${scope}，其中没有可读出文字的形状。${unreadNote}${tableNote}`;
+      return `${label}find 未在目标范围命中。${evidence}\n${findLine}请先用 ${reread} 读取目标范围完整原文，把 find 改成与上述当前文本之一逐字一致的片段。`;
+    }
+    return null;
+  }
+
+  // 出卡前核验：任一文字项定位不合法即抛错拒绝整卡（api.js 把错误转成工具结果回喂模型，不出卡）。
+  // 只读零写入；不猜测、不自动替换模型提交的 find/target。
+  async function verifyTextAnchorsBeforeCard(textItems) {
+    await PowerPoint.run(async context => {
+      const problems = [];
+      for (let i = 0; i < textItems.length; i++) {
+        try {
+          const loc = await locateTextEditTarget(context, textItems[i]);
+          const reason = describeTextAnchorProblem(textItems[i], loc);
+          if (reason) problems.push(`第 ${i + 1} 项文字项${reason}`);
+        } catch (e) {
+          const rereadHint = textItems[i] && textItems[i].target && textItems[i].target.kind === 'notes' ? 'get_slide_notes' : 'get_slide';
+          problems.push(`第 ${i + 1} 项文字项现状读取失败（${String((e && e.message) || e).slice(0, 160)}）：请先用 ${rereadHint} 核对目标现状后重出提案。`);
+        }
+      }
+      if (problems.length) {
+        throw new Error(`PPT 文字提案在出卡前核验未通过，已整卡拒绝（未写入任何内容）：\n${problems.join('\n')}\n请按各问题的当前证据修正后，把整批修改一次性重出提案；不要按原参数原样重试，也不要凭记忆微调锚点。`);
+      }
+    });
+  }
+
   // PPT 版上下文核实（对应 Word 的 enrichEditProposal）：layout 卡片的 operation.expected
   // 由程序在出卡时从活文档实时读取，模型自己编的快照一律覆盖。两个目的：
   // 1) 模型不必背诵精确快照（它根本拿不准），消灭「提案内容不完整」的反复打回；
@@ -2606,7 +2792,12 @@
     const targets = items.filter(item => item && (item.kind === 'layout' || item.operation)
       && item.operation && item.operation.type !== 'addShape'
       && item.target && (item.target.shapeId || item.target.slideId || item.target.index != null));
-    if (!targets.length || typeof PowerPoint === 'undefined') return args;
+    const textItems = items.filter(item => item && !(item.kind === 'layout' || item.operation));
+    if (typeof PowerPoint === 'undefined') return args;
+    // 【harden-ppt-excel-recovery 2.1】文字项（含省略 kind 与 target.kind:"notes"）出卡前先核验：
+    // 任一项无法唯一定位即抛错拒绝整卡，错误带 find 全文、目标当前文本与重读指引回喂模型。
+    if (textItems.length) await verifyTextAnchorsBeforeCard(textItems);
+    if (!targets.length) return args;
     const snapshotErrorOf = (target, reason, retryable) => ({ object: describeEditTarget(target), phase: 'enrich', reason, retryable });
     try {
       await PowerPoint.run(async context => {
@@ -3254,70 +3445,22 @@ MUST: whenever your answer refers to specific slides — which page contains wha
     try {
       const target = edit.target || {};
       return await PowerPoint.run(async context => {
-      const slides = context.presentation.slides;
-      slides.load('items');
-      await context.sync();
-      slides.items.forEach(s => s.load('id'));
-      await context.sync();
-      const slide = target.slideId ? slides.items.find(s => s.id === target.slideId) : slides.items[Number(target.index)];
-      if (!slide) throw App.makeStaleEditError('目标幻灯片已移动或删除，请重新读取此项。', { target });
-      let textShape = null;
-      let currentText = '';
-      let locatedCount = 0;
-      if (target.kind === 'notes') {
-        let notes;
-        try { notes = slide.notesSlide; notes.shapes.load('items'); await context.sync(); }
-        catch { throw new Error('无法访问该页的备注页，通常是这一页还没有备注页实例（而非宿主缺少备注 API）。'); }
-        const located = [];
-        for (const shape of notes.shapes.items) {
-          const text = await shapeTextSafe(context, shape);
-          const match = App.findSafeTextMatch(text, String(edit.find || ''));
-          if (match.status === 'matched') located.push({ shape, text });
-        }
-        locatedCount = located.length;
-        if (located.length === 1) { textShape = located[0].shape; currentText = located[0].text; }
-      } else {
-        slide.shapes.load('items');
-        await context.sync();
-        slide.shapes.items.forEach(s => s.load('id,type'));
-        await context.sync();
-        // 候选形状 = 顶层形状 + 各组合的子形状：读取侧对组合已递归可见，写侧必须能定位回去
-        let shapes;
-        if (target.shapeId) {
-          const found = await findShapeById(context, slide, target.shapeId, 'id');
-          shapes = found ? [found] : [];
-        } else {
-          shapes = [...slide.shapes.items];
-          for (const candidate of slide.shapes.items) {
-            if (String(candidate.type || '') !== 'Group' || !candidate.shapes) continue;
-            try {
-              candidate.shapes.load('items');
-              await context.sync();
-              candidate.shapes.items.forEach(child => { try { child.load('id'); } catch {} });
-              await context.sync();
-              shapes.push(...(candidate.shapes.items || []));
-            } catch {}
-          }
-        }
-        const located = [];
-        for (const shape of shapes) {
-          const text = await shapeTextSafe(context, shape);
-          if (App.findSafeTextMatch(text, String(edit.find || '')).status === 'matched') located.push({ shape, text });
-        }
-        locatedCount = located.length;
-        if (located.length === 1) { textShape = located[0].shape; currentText = located[0].text; }
+      // 【harden-ppt-excel-recovery 2.1】定位骨架与出卡前核验共用 locateTextEditTarget（只有一份语义）；
+      // 应用时再核验：出卡后用户可能又改了文档，定位失败即 STALE_EDIT 零写入，
+      // 错误带提交 find 与目标当前文本的完整对照（describeTextAnchorProblem）。
+      const loc = await locateTextEditTarget(context, edit);
+      // 定位唯一 = 恰好一框唯一命中，且没有任何别框同文多次命中的混合歧义（不许猜）
+      const entry = loc.located.length === 1 && !loc.ambiguous.length ? loc.located[0] : null;
+      const match = entry ? App.findSafeTextMatch(entry.text, String(edit.find || '')) : null;
+      if (!entry || !match || match.status !== 'matched') {
+        const reason = describeTextAnchorProblem(edit, loc) || '目标文本框或备注中的原文已变化，请重新读取此项。';
+        throw App.makeStaleEditError(`生成提案后目标已变化，为避免覆盖你的修改，此项未应用。${reason}`, { target, currentText: entry ? entry.text : undefined });
       }
-      if (!textShape) {
-        // 同一段文字命中多个文本框时报「请用 shapeId 限定」，而不是「原文已变化」——后者会让模型死循环重读
-        if (locatedCount > 1) throw App.makeStaleEditError('该文字出现在多个文本框中，请用 target.shapeId 限定目标。', { target });
-        throw App.makeStaleEditError('目标文本框或备注中的原文已变化，请重新读取此项。', { target });
-      }
+      const slide = loc.slide;
+      const textShape = entry.shape;
+      const currentText = entry.text;
       // 保留字符级格式：只对命中片段的 range 做 insertText(Replace)，文本框内其余 run 的
       // 加粗/混排字体/局部颜色保持不动。getSubstring 不可用（旧宿主）时降级为整框替换。
-      const match = App.findSafeTextMatch(currentText, String(edit.find || ''));
-      if (match.status !== 'matched') {
-        throw App.makeStaleEditError(match.status === 'ambiguous' ? '目标文字出现多次，无法安全判断要修改哪一处。' : '幻灯片中的原文已变化，请重新读取此项。', { target, currentText });
-      }
       // 【R1/30.2】异步定位（多段 sync）已完成、文本尚未提交：此处检查取消——
       // 停止发生即 WRITE_CANCELLED，形状保持原文本。
       op.token.throwIfCancelled();
