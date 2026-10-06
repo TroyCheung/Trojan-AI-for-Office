@@ -117,6 +117,77 @@
   }
   // 回读验证的体积上限：超过则跳过并明示（与读取 cellLimit 同档，避免大写入拖慢回合）
   const WRITE_VERIFY_CELL_LIMIT = 2000;
+  // 提交前的校验/拒绝一律带 writeState:'not_committed'：这些错误发生在任何写入之前，
+  // 「确定未写入」让结局合同判成 not_written，同参数修正重试不被重放保护误拦。
+  function notCommittedError(message) {
+    const e = new Error(message);
+    e.writeState = 'not_committed';
+    return e;
+  }
+  // expectedCells 单格语义的唯一出处：setCellRange 应用期核验与 enrichEditProposal 出卡前
+  // 核验共用同一解析，两处口径不得分叉。
+  // {formula:"=.."} 按公式文本比（读 formulas）；{value:..}/裸值按值比（读 values，
+  // 经 App.valuesEquivalent，null/空串互认、数字按 Object.is、文本走归一化比对）。
+  function expectedCellSpec(spec) {
+    const hasFormula = spec && typeof spec === 'object' && typeof spec.formula === 'string' && spec.formula.startsWith('=');
+    const expected = spec && typeof spec === 'object' && Object.prototype.hasOwnProperty.call(spec, 'value') ? spec.value : (hasFormula ? spec.formula : spec);
+    return { isFormula: hasFormula, expected };
+  }
+  function expectedCellMatches(spec, actualValue, actualFormula) {
+    const { isFormula, expected } = expectedCellSpec(spec);
+    return App.valuesEquivalent(isFormula ? actualFormula : actualValue, expected);
+  }
+  // 快照失配的证据展示：封顶行数与超长截断（60 字符），不倾倒整块矩阵。
+  const SNAPSHOT_EVIDENCE_CELL_CAP = 8;
+  // set_cell_range 单次写入与提案出卡前核验共用的格数上限（同一常量，不另立阈值）：
+  // verifyCellSnapshots 借同一上限拦下「快照核验就要物化超大区域」的提案。
+  const MAX_WRITE_CELLS = 10000;
+  function clampCellEvidence(s) {
+    const t = typeof s === 'string' ? s : String(s);
+    return t.length > 60 ? t.slice(0, 60) + `…（已截断，全长 ${t.length} 字符）` : t;
+  }
+  // 展示单格证据：先截内容再加引号——引号包着的是截断后的文本，超长原文不整段透出。
+  // 对象走 JSON（封顶截断）：{val:5} 这类畸形规格不得显示成 [object Object]。
+  function cellPieceText(v) {
+    if (v === null || v === undefined || v === '') return '(空)';
+    if (typeof v === 'string') return `"${clampCellEvidence(v)}"`;
+    if (typeof v === 'object') return clampCellEvidence(JSON.stringify(v));
+    return clampCellEvidence(String(v));
+  }
+  // expectedCells 单格规格的形态判定：合法形态 = null / 裸原始值 / {value: …} /
+  // {formula: "=…"}；同带两者或字段不可识别 → 返回可读问题串（vet 静态拒绝
+  // 与 enrich 运行时兜底共用）。只做形态判定，不改两侧比较语义。
+  function expectedSpecProblem(spec) {
+    if (spec == null || typeof spec !== 'object') return null;
+    const hasValue = Object.prototype.hasOwnProperty.call(spec, 'value');
+    const hasFormula = Object.prototype.hasOwnProperty.call(spec, 'formula');
+    const validFormula = typeof spec.formula === 'string' && spec.formula.startsWith('=');
+    if (hasValue && hasFormula) return '同时带 value 与 formula，请二选一（值填 {value: …}，公式填 {formula: "=…"}）';
+    if (hasValue) return null;   // {value:null} / {value:""} 是合法空值形态，保留
+    if (validFormula) return null;
+    if (hasFormula) return `formula 必须以 "=" 开头的公式文本（收到 ${clampCellEvidence(JSON.stringify(spec.formula))}）`;
+    const keys = Object.keys(spec).map(k => JSON.stringify(k)).join(', ');
+    return `没有可识别的 value / formula 字段（收到字段：${keys || '（空对象）'}）`;
+  }
+  // 矩阵最大行宽的安全求法：Math.max(...rows) 对模型可能提交的超大 expectedCells 会
+  // 在上限检查前就栈溢出（spread 展开几十万元素），一律用循环。
+  function matrixRowWidth(matrix) {
+    let w = 0;
+    for (const row of matrix || []) if (Array.isArray(row) && row.length > w) w = row.length;
+    return w;
+  }
+  function expectedCellEvidence(address, spec, actualValue, actualFormula) {
+    const { isFormula, expected } = expectedCellSpec(spec);
+    const expectedText = isFormula ? `公式 "${clampCellEvidence(expected)}"` : `值 ${cellPieceText(expected)}`;
+    const formulaText = typeof actualFormula === 'string' && actualFormula.startsWith('=') ? `，公式 "${clampCellEvidence(actualFormula)}"` : '';
+    return `${address}：提交期望 ${expectedText}，实际 值 ${cellPieceText(actualValue)}${formulaText}`;
+  }
+  // 失配报错（出卡前与应用期共用骨架）：总数明示 + 证据行封顶 + read_range 指引 + 零写入声明。
+  function staleSnapshotMessage(label, sheetId, range, lines, total, action) {
+    const head = `目标单元格已变化：${label ? `提案「${String(label).slice(0, 40)}」的` : ''}expectedCells 快照与当前工作表不符（sheetId ${sheetId} 区域 ${range}，失配 ${total} 格）`;
+    const capNote = total > lines.length ? `\n（失配共 ${total} 格，以上仅展示前 ${lines.length} 格，其余以 read_range 读取结果为准。）` : '';
+    return `${head}\n${lines.join('\n')}${capNote}\n${action} 未写入任何单元格。`;
+  }
   // 会话级撤销栈（Office.js 写入不进 Excel 撤销栈——平台限制；快照来自每次写入前的真实值）
   const UNDO_STACK = [];
   async function undoLastWrite() {
@@ -401,10 +472,9 @@
     requireOffice();
     const { sheetId, range, expectedCells, copyToRange, resizeWidth, resizeHeight, allow_overwrite = false, _skipUndo } = args;
     let cells = args.cells; // let：Excel.run 内按目标区域做行宽补齐后重赋
-    const maxWriteCells = 10000;
     if (!Array.isArray(cells) || !cells.length || !cells.every(Array.isArray)) throw new Error('cells 必须是二维数组（每个内层数组对应目标区域的一行）。例如 A1:A2 写入 500：cells=[[{value:500}],[{value:500}]]，而不是 [{value:500},{value:500}] 这样的扁平数组。请修正 cells 结构后重试。');
     const writeCellCount = cells.reduce((sum, row) => sum + row.length, 0);
-    if (writeCellCount > maxWriteCells) throw new Error(`Refusing to write ${writeCellCount} cells in one call. Split the write into chunks of ${maxWriteCells} cells or fewer.`);
+    if (writeCellCount > MAX_WRITE_CELLS) throw notCommittedError(`Refusing to write ${writeCellCount} cells in one call. Split the write into chunks of ${MAX_WRITE_CELLS} cells or fewer.`);
     // 【用户 2026-08-31 拍板：空目标直通】confirm 模式下往空单元格写入是低风险操作（对齐官方
     // write_cells 语义），直接放行不出卡；覆盖已有内容仍必须走 propose_edits 卡。
     // 提案应用路径（带 expectedCells 快照）不受此闸——那是用户已在卡上点过「应用」的写入。
@@ -452,17 +522,27 @@
       const start = parseStart(r.address);
       if (expectedCells) {
         if (!Array.isArray(expectedCells) || expectedCells.length !== r.rowCount || expectedCells.some(row => !Array.isArray(row) || row.length !== r.columnCount)) {
-          throw new Error('expectedCells dimensions must match the target range');
+          throw notCommittedError('expectedCells dimensions must match the target range');
         }
-        const changed = [];
+        // 比较口径抽到 expectedCellMatches（与出卡前核验同源）；错误从「地址清单 + 整块矩阵」
+        // 改为逐格证据（提交期望 vs 真实值/公式，封顶 8 行、超长截断），并给 read_range 指引。
+        // currentValues/currentFormulas 载荷保留（卡面「刷新重提」路径消费），消息本体不倾倒矩阵。
+        const evidence = [];
+        let mismatchTotal = 0;
         for (let i = 0; i < r.rowCount; i++) for (let j = 0; j < r.columnCount; j++) {
-          const spec = expectedCells[i][j];
-          const hasFormula = spec && typeof spec === 'object' && typeof spec.formula === 'string' && spec.formula.startsWith('=');
-          const expected = spec && typeof spec === 'object' && Object.prototype.hasOwnProperty.call(spec, 'value') ? spec.value : (hasFormula ? spec.formula : spec);
-          const actual = hasFormula ? r.formulas[i][j] : r.values[i][j];
-          if (!App.valuesEquivalent(actual, expected)) changed.push(a1(start.startRow + i, start.startCol + j));
+          if (expectedCellMatches(expectedCells[i][j], r.values[i][j], r.formulas[i][j])) continue;
+          mismatchTotal++;
+          if (evidence.length < SNAPSHOT_EVIDENCE_CELL_CAP) {
+            evidence.push(expectedCellEvidence(a1(start.startRow + i, start.startCol + j), expectedCells[i][j], r.values[i][j], r.formulas[i][j]));
+          }
         }
-        if (changed.length) throw App.makeStaleEditError(`目标单元格已变化：${changed.slice(0, 8).join(', ')}`, { target: { sheetId, range }, currentValues: r.values, currentFormulas: r.formulas });
+        if (mismatchTotal) {
+          throw App.makeStaleEditError(
+            staleSnapshotMessage(null, sheetId, range, evidence, mismatchTotal,
+              `内容可能在出卡后被修改。请用 read_range(sheetId=${sheetId}, range="${range}") 重新读取该区域，按真实内容重填 expectedCells 后重新提交。`),
+            { target: { sheetId, range }, mismatchedCells: mismatchTotal, evidence, currentValues: r.values, currentFormulas: r.formulas }
+          );
+        }
       }
       if (!allow_overwrite) assertRangeEmpty(r, range);
       if (copyTarget && !allow_overwrite) assertRangeEmpty(copyTarget, copyToRange);
@@ -1570,10 +1650,20 @@ When the user asks about their workbook data, read it first. Use A1 notation for
   };
   function defaultArgsForTool(name) { return App.pretty(SAMPLE_ARGS[name] || {}); }
 
+  // 单元格提案项的取值口径（vet / enrich / applyEdit 三处同源）：target 内嵌或提案项顶层任填其一。
+  function proposalCellFields(edit) {
+    const target = (edit && edit.target) || {};
+    return {
+      cells: target.cells ?? (edit ? edit.cells : undefined),
+      expectedCells: target.expectedCells ?? (edit ? edit.expectedCells : undefined)
+    };
+  }
+
   // 应用用户在 Diff 卡上选中的提案版本（覆盖写入）
   async function applyEdit(edit) {
     const target = edit.target || {};
-    if (!Array.isArray(target.expectedCells)) throw App.makeStaleEditError('提案缺少单元格原值快照，请重新读取此项。', { target: { sheetId: target.sheetId, range: target.range } });
+    const fields = proposalCellFields(edit);
+    if (!Array.isArray(fields.expectedCells)) throw App.makeStaleEditError('提案缺少单元格原值快照（target.expectedCells 或提案项顶层 expectedCells 任填其一，必须来自 read_range 的真实读取），请重新读取此项。', { target: { sheetId: target.sheetId, range: target.range } });
     // 【R1/30.2 + 31-B】写入生命周期：进入即计入 pendingDocWrites 并捕获取消代次；
     // 令牌作为本操作的内部参数传入 setCellRange，在实际提交点读取——不用模块级
     // 可覆盖变量（批量逐项应用的异步点击可让两次 applyEdit 重叠，全局令牌会被另一
@@ -1581,15 +1671,23 @@ When the user asks about their workbook data, read it first. Use A1 notation for
     // set_cell_range 时不传令牌、行为不变。
     const op = App.docWriteBegin('excel.applyEdit');
     try {
-      return await TOOL_EXECUTORS.set_cell_range({ sheetId: target.sheetId, range: target.range, cells: target.cells, expectedCells: target.expectedCells, allow_overwrite: true }, op.token);
+      return await TOOL_EXECUTORS.set_cell_range({ sheetId: target.sheetId, range: target.range, cells: fields.cells, expectedCells: fields.expectedCells, allow_overwrite: true }, op.token);
     } finally {
       op.end();
     }
   }
 
-  // 提案层校验（api.js 拦截 propose_edits 时调用）：坏公式在出卡前打回模型重写。
-  // 返回 null 表示通过；返回错误串则作为 tool result 回喂。静态可判定的缺陷只有公式语法——
-  // expectedCells/cells 形状问题在执行层有明确报错，不出卡前臆断。
+  // 提案层校验（api.js 拦截 propose_edits 时调用）：静态可判定的缺陷在出卡前打回模型重写，
+  // 返回 null 表示通过；返回错误串则作为 tool result 回喂。查公式语法与 cells/expectedCells
+  // 的二维形状、单格规格形态、与目标区域行列数的一致性。目标是否真实存在属运行时信息，
+  // 由 enrichEditProposal 异步读取后核验。
+  function parseA1Shape(range) {
+    const part = String(range || '').split('!').pop().replace(/\$/g, '').replace(/'/g, '').trim();
+    if (!/^[A-Za-z]{1,3}\d+(:[A-Za-z]{1,3}\d+)?$/.test(part)) return null;
+    const [a, b] = part.split(':');
+    const pa = parseStart(a), pb = parseStart(b || a);
+    return { rows: Math.abs(pb.startRow - pa.startRow) + 1, cols: Math.abs(pb.startCol - pa.startCol) + 1 };
+  }
   function vetEditProposalArgs(args) {
     const items = []
       .concat(Array.isArray(args && args.edits) ? args.edits : [])
@@ -1597,14 +1695,41 @@ When the user asks about their workbook data, read it first. Use A1 notation for
     for (let index = 0; index < items.length; index++) {
       const item = items[index];
       const at = `edits/changes[${index}]${item && item.label ? `（${String(item.label).slice(0, 40)}）` : ''}`;
-      // cells 形状在出卡前点名（v151 真机：一维 cells 出卡后应用必败，模型盲试）
-      const rawCells = item && item.target && item.target.cells;
+      // cells 形状在出卡前点名（v151 真机：一维 cells 出卡后应用必败，模型盲试）。
+      // 取值与 applyEdit 同源（proposalCellFields）：target 内嵌或提案项顶层任填其一。
+      const rawCells = proposalCellFields(item).cells;
       if (rawCells != null && (!Array.isArray(rawCells) || !rawCells.length || !rawCells.every(Array.isArray))) {
-        return `${at} 的 target.cells 必须是二维数组（每个内层数组对应目标区域的一行），例如 [[{value:500}],[{value:500}]]。收到的是${Array.isArray(rawCells) ? '扁平数组' : '非数组'}，请修正后重新提交。`;
+        return `${at} 的 cells（target.cells 或提案项顶层 cells 任填其一）必须是二维数组（每个内层数组对应目标区域的一行），例如 [[{value:500}],[{value:500}]]。收到的是${Array.isArray(rawCells) ? '扁平数组' : '非数组'}，请修正后重新提交。`;
       }
       const cells = rawCells;
-      if (!Array.isArray(cells)) continue;
       const range = String((item.target && item.target.range) || '');
+      // expectedCells 形状前置校验：扁平数组、畸形规格与行列数不符在这里打回，原先要到
+      // 应用期 set_cell_range 才抛「dimensions must match」，必败卡已先摆到用户面前。
+      const rawExpected = proposalCellFields(item).expectedCells;
+      if (rawExpected != null) {
+        if (!Array.isArray(rawExpected) || !rawExpected.length || !rawExpected.every(Array.isArray)) {
+          return `${at} 的 expectedCells（target.expectedCells 或提案项顶层 expectedCells 任填其一）必须是二维数组（每个内层数组对应目标区域的一行）。例如 A1:A2 的原值 120、130：expectedCells=[[{value:120}],[{value:130}]]，而不是 [{value:120},{value:130}] 这样的扁平数组；空格填 null，公式格填 {formula:"=..."}。收到的是${Array.isArray(rawExpected) ? '扁平数组' : '非数组'}，请先用 read_range 读取该区域，按真实行列原样填写后重新提交。`;
+        }
+        // 单格规格形态：{formula:""}、{val:5}、value+formula 同带等畸形规格，此前要到
+        // 应用期比较才以失配暴露且证据不可读；这里静态点名并展示实际字段。
+        for (let i = 0; i < rawExpected.length; i++) {
+          for (let j = 0; j < rawExpected[i].length; j++) {
+            const problem = expectedSpecProblem(rawExpected[i][j]);
+            if (problem) {
+              return `${at} 的 expectedCells 第 ${i + 1} 行第 ${j + 1} 列是无法识别的规格：${problem}。合法形态：{value: 值}、{formula: "=公式"} 或 null（空格填 null，裸数字/文字也兼容）。请先用 read_range 读取该区域，按真实内容原样重填 expectedCells 后重新提交。收到的是 ${clampCellEvidence(JSON.stringify(rawExpected[i][j]))}`;
+            }
+          }
+        }
+        const shape = parseA1Shape(range) || (Array.isArray(cells) ? { rows: cells.length, cols: matrixRowWidth(cells) } : null);
+        if (shape) {
+          const rows = rawExpected.length;
+          const cols = matrixRowWidth(rawExpected);
+          if (rows !== shape.rows || cols !== shape.cols) {
+            return `${at} 的 expectedCells 形状（${rows} 行 × ${cols} 列）与目标区域 ${range || '(未给 range)'}（${shape.rows} 行 × ${shape.cols} 列）不一致。expectedCells 必须与 range 同形状（行数、列数完全相等，空格填 null，公式格填 {formula:"=..."}），例如 B2:C3 要写 [[{value:1},{value:2}],[{value:3},{value:4}]]。请先用 read_range 读取该区域，按返回的真实行列原样填写后重新提交。`;
+          }
+        }
+      }
+      if (!Array.isArray(cells)) continue;
       for (let i = 0; i < cells.length; i++) {
         if (!Array.isArray(cells[i])) continue;
         for (let j = 0; j < cells[i].length; j++) {
@@ -1618,6 +1743,98 @@ When the user asks about their workbook data, read it first. Use A1 notation for
       }
     }
     return null;
+  }
+
+  // ---- 提案出卡前核验（对应 Word 宿主的 enrichEditProposal）----
+  // ui.js 出卡前（vet 之后）异步调用。单元格类提案项对 expectedCells 做只读实值核验：
+  // 此前实值校验只在用户点「应用」时的 setCellRange 做（vet 只查形状），快照失配的必败卡
+  // 会先摆到用户面前。规则：
+  //   - 任一格失配即抛错回喂模型（api.js 把 enrich 抛错转 success:false 工具结果，卡不出、零写入）
+  //   - 比较口径与 setCellRange 同源（expectedCellMatches / expectedCellSpec），公式比文本、
+  //     值比 valuesEquivalent（null/空串互认），绝不因「读不到」视为相符
+  //   - 不自动改写模型提交的快照：模型必须按 read_range 证据重新提案
+  //   - 缺失快照的项不在此拦（遵从既有 vet 约束；应用时由 applyEdit 报「缺少快照」）
+  //   - 形状先按真机行列数核对（vet 的 parseA1Shape 查不出整列/整行等写法），再读值；超过
+  //     10000 格的区域直接引导拆分（与 set_cell_range 写入上限同档），避免出卡前物化百万行矩阵
+  async function enrichEditProposal(args) {
+    const items = []
+      .concat(Array.isArray(args && args.changes) ? args.changes : [])
+      .concat(Array.isArray(args && args.edits) ? args.edits : []);
+    await verifyCellSnapshots(items);
+    return args;
+  }
+  async function verifyCellSnapshots(items) {
+    if (typeof Excel === 'undefined') return;
+    const jobs = [];
+    for (const item of items) {
+      if (!item) continue;
+      const fields = proposalCellFields(item);
+      if (!Array.isArray(fields.expectedCells)) continue;
+      const sheetId = item.target && item.target.sheetId;
+      const range = String((item.target && item.target.range) || '');
+      const label = String(item.label || '');
+      // 带快照但目标不完整（sheetId 缺失/''/非数字或 range 空）此前静默跳过，vet 也不拦，
+      // 必败卡照出。这里拒绝并指明 get_workbook_overview / read_range。
+      if (sheetId == null || sheetId === '' || !Number.isFinite(Number(sheetId)) || !range.trim()) {
+        throw notCommittedError(`提案「${label.slice(0, 40)}」带 expectedCells 快照但目标不完整（sheetId=${JSON.stringify(sheetId == null ? null : sheetId)}，range=${JSON.stringify(range)}）。请先用 get_workbook_overview 获取真实 sheetId、read_range 确认目标区域地址，再重新提案。未写入。`);
+      }
+      // 规格形态运行时兜底（正常链路 vet 已静态拒绝）：无法识别的规格不进比较，直接点名。
+      for (let i = 0; i < fields.expectedCells.length; i++) {
+        const row = fields.expectedCells[i];
+        if (!Array.isArray(row)) continue;   // 非法行形状交给下方真机形状核对统一报错
+        for (let j = 0; j < row.length; j++) {
+          const problem = expectedSpecProblem(row[j]);
+          if (problem) {
+            throw notCommittedError(`提案「${label.slice(0, 40)}」的 expectedCells 第 ${i + 1} 行第 ${j + 1} 列是无法识别的规格：${problem}。合法形态：{value: 值}、{formula: "=公式"} 或 null（空格填 null，裸数字/文字也兼容）。请先用 read_range(sheetId=${Number(sheetId)}, range="${range}") 读取真实内容，按原样重填 expectedCells 后重新提案。未写入。`);
+          }
+        }
+      }
+      jobs.push({ item, sheetId: Number(sheetId), range, expectedCells: fields.expectedCells });
+    }
+    if (!jobs.length) return;
+    await Excel.run(async context => {
+      for (const job of jobs) {
+        const label = String(job.item.label || '');
+        const sheet = await worksheetById(context, job.sheetId);
+        if (!sheet) {
+          throw notCommittedError(`提案「${label.slice(0, 40)}」的目标工作表 sheetId ${job.sheetId}（区域 ${job.range}）不存在。先用 get_workbook_overview 核对真实 sheetId，再重新提案。未写入。`);
+        }
+        // 先只取行列元数据核对形状：整列/整行等 vet 查不出的大范围在这里就地拦下，
+        // 不为注定失配的快照物化百万行 values/formulas。
+        const meta = sheet.getRange(job.range);
+        meta.load('address,rowCount,columnCount');
+        await context.sync();
+        const rows = job.expectedCells.length;
+        if (rows !== meta.rowCount || job.expectedCells.some(row => !Array.isArray(row) || row.length !== meta.columnCount)) {
+          const cols = matrixRowWidth(job.expectedCells);
+          throw notCommittedError(`提案「${label.slice(0, 40)}」的 expectedCells 形状（${rows} 行 × ${cols} 列）与目标区域 ${job.range} 的真实形状（${meta.rowCount} 行 × ${meta.columnCount} 列）不一致。请先用 read_range(sheetId=${job.sheetId}, range="${job.range}") 按真实行列原样重填 expectedCells 后重新提案。未写入。`);
+        }
+        const cellCount = meta.rowCount * meta.columnCount;
+        if (cellCount > MAX_WRITE_CELLS) {
+          throw notCommittedError(`提案「${label.slice(0, 40)}」的目标区域 ${job.range} 有 ${cellCount} 格，超过单次写入/核验上限（${MAX_WRITE_CELLS} 格）。请把修改拆成多个 ≤${MAX_WRITE_CELLS} 格的提案分批提交。未写入。`);
+        }
+        const r = sheet.getRange(job.range);
+        r.load('values,formulas');
+        await context.sync();
+        const start = parseStart(meta.address);
+        const evidence = [];
+        let mismatchTotal = 0;
+        for (let i = 0; i < meta.rowCount; i++) for (let j = 0; j < meta.columnCount; j++) {
+          if (expectedCellMatches(job.expectedCells[i][j], r.values[i][j], r.formulas[i][j])) continue;
+          mismatchTotal++;
+          if (evidence.length < SNAPSHOT_EVIDENCE_CELL_CAP) {
+            evidence.push(expectedCellEvidence(a1(start.startRow + i, start.startCol + j), job.expectedCells[i][j], r.values[i][j], r.formulas[i][j]));
+          }
+        }
+        if (mismatchTotal) {
+          throw App.makeStaleEditError(
+            staleSnapshotMessage(label, job.sheetId, job.range, evidence, mismatchTotal,
+              `请先用 read_range(sheetId=${job.sheetId}, range="${job.range}") 读取真实值/公式，按读到的内容原样重填 expectedCells 后重新提案；不要凭记忆微调快照。`),
+            { target: { sheetId: job.sheetId, range: job.range }, mismatchedCells: mismatchTotal, evidence }
+          );
+        }
+      }
+    });
   }
 
   // 真机能力探测（学 PPT 的 HOST_QUIRKS 方法论）：宿主挂载后只读探测一次，
@@ -1704,6 +1921,7 @@ When the user asks about their workbook data, read it first. Use A1 notation for
     follow: maybeFollow,
     applyEdit,
     vetEditProposalArgs,
+    enrichEditProposal,
     probeExcelCapabilities,
     // confirm 模式下可直接生效的工具：resize_range 调列宽/行高、insert_delete（delete 分支由执行器
     // 内部闸门单独拦截）、hide_unhide、freeze_panes、view_settings（hide_sheet 分支同拦）、
