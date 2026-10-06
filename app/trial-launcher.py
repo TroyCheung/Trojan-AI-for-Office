@@ -203,7 +203,7 @@ def serve():
     class TrialHandler(server.Handler):
         def do_GET(self):
             if self.path == '/trial-health':
-                self.send_json(200,{'application':LABEL,'version':'0.1.2'})
+                self.send_json(200,{'application':LABEL,'version':'0.1.5'})
             else:
                 super().do_GET()
         def do_POST(self):

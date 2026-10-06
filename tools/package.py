@@ -56,7 +56,7 @@ for p in runtime.rglob('*'):
 launcher=app/'Contents/MacOS/OfficeAITrial'
 launcher.write_text('#!/bin/sh\nBASE_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../Resources" && pwd)"\nexport PYTHONHOME="$BASE_DIR/runtime"\nexport SSL_CERT_FILE="$BASE_DIR/payload/cacert.pem"\nexec "$BASE_DIR/runtime/bin/python3.13" -B "$BASE_DIR/payload/trial-launcher.py" --install\n')
 launcher.chmod(0o755)
-(app/'Contents/Info.plist').write_bytes(plistlib.dumps({'CFBundleExecutable':'OfficeAITrial','CFBundleIdentifier':'local.office-ai-trial.app','CFBundleName':'Trojan AI for Office','CFBundlePackageType':'APPL','CFBundleShortVersionString':'0.1.4','LSMinimumSystemVersion':'11.0','LSUIElement':True}))
+(app/'Contents/Info.plist').write_bytes(plistlib.dumps({'CFBundleExecutable':'OfficeAITrial','CFBundleIdentifier':'local.office-ai-trial.app','CFBundleName':'Trojan AI for Office','CFBundlePackageType':'APPL','CFBundleShortVersionString':'0.1.5','LSMinimumSystemVersion':'11.0','LSUIElement':True}))
 unapp=app.parent/'卸载 Trojan AI for Office.app'
 (unapp/'Contents/MacOS').mkdir(parents=True)
 unlauncher=unapp/'Contents/MacOS/Uninstall'
@@ -73,7 +73,7 @@ component_rules=plistlib.loads(components.read_bytes())
 for component in component_rules:
     component['BundleIsRelocatable']=False
 components.write_bytes(plistlib.dumps(component_rules))
-run(['pkgbuild','--root',STAGE/'mac-root','--component-plist',components,'--identifier','local.office-ai-trial.installer','--version','0.1.4','--install-location','/',OUT/'Trojan-AI-for-Office-0.1.4-mac.pkg'])
+run(['pkgbuild','--root',STAGE/'mac-root','--component-plist',components,'--identifier','local.office-ai-trial.installer','--version','0.1.5','--install-location','/',OUT/'Trojan-AI-for-Office-0.1.5-mac.pkg'])
 for p in OUT.iterdir():
     if p.suffix == '.pkg':
         print(p.name,p.stat().st_size,hashlib.sha256(p.read_bytes()).hexdigest())
